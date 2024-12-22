@@ -1,4 +1,4 @@
 scripts/datasets
 scripts/output
 scripts/runs
-yolo11n.pt
+scripts/yolo11n.pt

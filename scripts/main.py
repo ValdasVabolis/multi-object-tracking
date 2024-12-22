@@ -144,7 +144,7 @@ def lock_and_track_object(video_paths, model_path, output_path, log_path, durati
 
 lock_and_track_object(
     video_paths=[VIDEO_PATH1, VIDEO_PATH2],
-    model_path='yolo11n.pt',
+    model_path='../models/yolo11n.pt',
     output_path='output/locked_tracking_output.mp4',
     log_path='output/object_movement_log.json'
 )
