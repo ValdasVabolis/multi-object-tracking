@@ -1,5 +1,6 @@
 ultralytics==8.3.51 
 opencv-contrib-python==4.10.0.84
 scikit-learn==1.6.0
-fastreid==1.4.0
+torchreid
+gdown
 numpy==1.26.4

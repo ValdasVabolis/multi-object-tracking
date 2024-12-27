@@ -4,6 +4,7 @@ import numpy as np
 import json
 from torchvision import transforms
 from torchvision.models import resnet50
+from torchreid.utils import FeatureExtractor
 from sklearn.metrics.pairwise import cosine_similarity
 import torch
 
@@ -12,16 +13,13 @@ VIDEO_PATH1 = f"{WILDTRACK_PATH}/cam1.mp4"
 VIDEO_PATH2 = f"{WILDTRACK_PATH}/cam4.mp4"
 
 
-def setup_reid_model(model_path):
-    checkpoint = torch.load(model_path, map_location="cpu")
-
-    reid_model = resnet50()
-    reid_model.fc = torch.nn.Linear(reid_model.fc.in_features, 512)
-    reid_model.load_state_dict(checkpoint, strict=False)
-
-    reid_model.eval()
-    reid_model.to("cuda" if torch.cuda.is_available() else "cpu")
-    return reid_model
+def setup_reid_model():
+    extractor = FeatureExtractor(
+        model_name='osnet_x1_0',
+        model_path='',
+        device='cuda' if torch.cuda.is_available() else 'cpu'
+    )
+    return extractor
 
 
 def preprocess_reid_image(frame, bbox):
@@ -48,10 +46,12 @@ def preprocess_reid_image(frame, bbox):
 
 
 def extract_embedding(reid_model, frame, bbox):
-    tensor = preprocess_reid_image(frame, bbox)
-    with torch.no_grad():
-        embedding = reid_model(tensor)
-    return embedding.cpu().numpy().flatten()
+    x1, y1, x2, y2 = map(int, bbox)
+    cropped = frame[y1:y2, x1:x2]
+    if cropped.size == 0:
+        return None
+    embedding = reid_model(cropped)
+    return embedding.flatten()
 
 
 def match_with_cache(embedding, cache):
@@ -60,21 +60,18 @@ def match_with_cache(embedding, cache):
     similarities = [cosine_similarity([embedding], [obj["embedding"]])[0][0] for obj in cache]
     best_match_index = int(np.argmax(similarities))
     best_similarity = similarities[best_match_index]
-    if best_similarity > 0.8:  # Threshold for matching
+    if best_similarity > 0.8:
         return cache[best_match_index]["id"]
     return None
 
 
 def lock_and_track_object(video_paths, model_path, reid_model_path, output_path, log_path, duration=5):
     model = YOLO(model_path)
-    reid_model = setup_reid_model(reid_model_path)
-    json_log = []  # To log object movement
-    tracker = None
-    target_bbox = None
-    locked = False
-    current_id = 0
-    out_of_sight_frames = 0
+    reid_model = setup_reid_model()
+    json_log = []
     cache = []
+    tracked_objects = []
+    current_id = 0
 
     def log_position(frame_number, bbox, video_name, object_id, from_cache=False):
         entry = {
@@ -91,90 +88,42 @@ def lock_and_track_object(video_paths, model_path, reid_model_path, output_path,
         }
         json_log.append(entry)
 
-    def initialize_tracker(frame, bbox):
-        nonlocal tracker
-        tracker = cv2.TrackerCSRT_create()
-        x, y, w, h = int(bbox[0]), int(bbox[1]), int(bbox[2] - bbox[0]), int(bbox[3] - bbox[1])
-        tracker.init(frame, (x, y, w, h))
-
-    def is_out_of_sight(bbox, frame_width, frame_height):
-        x1, y1, x2, y2 = bbox
-        box_width, box_height = x2 - x1, y2 - y1
-        return (
-            box_width < 50 or box_height < 50 or
-            x1 < 10 or y1 < 10 or
-            x2 > frame_width - 10 or y2 > frame_height - 10
-        )
-
     def process_frame(frame, frame_number, video_name):
-        nonlocal target_bbox, locked, tracker, current_id, out_of_sight_frames
-        frame_height, frame_width = frame.shape[:2]
+        nonlocal cache, tracked_objects, current_id
+        results = model(frame)
+        detections = results[0].boxes
 
-        cache_info = [f"ID {obj['id']}: {'Present' if obj.get('present', False) else 'Not Present'}" for obj in cache]
-        for idx, text in enumerate(cache_info):
-            cv2.putText(frame, text, (10, 30 + idx * 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
+        if detections is not None and len(detections.xyxy) > 0:
+            for detection, cls in zip(detections.xyxy, detections.cls.cpu().numpy()):
+                if int(cls) == 0:  # Person class
+                    bbox = detection.cpu().numpy()
+                    embedding = extract_embedding(reid_model, frame, bbox)
 
-        if locked and tracker is not None:
-            success, box = tracker.update(frame)
-            if success:
-                x1, y1, w, h = map(int, box)
-                target_bbox = [x1, y1, x1 + w, y1 + h]
-                log_position(frame_number, target_bbox, video_name, current_id)
+                    matched_id = match_with_cache(embedding, cache)
+                    if matched_id is not None:
+                        log_position(frame_number, bbox, video_name, matched_id, from_cache=True)
+                        color = (0, 0, 255)
+                        label = f"FROM CACHE: ID {matched_id}"
+                        if matched_id not in tracked_objects:
+                            tracked_objects.append(matched_id)
+                    else:
+                        if len(tracked_objects) < 5:  # Limit the number of tracked objects to 5
+                            current_id += 1
 
-                if is_out_of_sight(target_bbox, frame_width, frame_height):
-                    out_of_sight_frames += 1
-                    if out_of_sight_frames > 10:
-                        locked = False
-                        tracker = None
-                        out_of_sight_frames = 0
-                else:
-                    out_of_sight_frames = 0
-            else:
-                locked = False
-                tracker = None
-                out_of_sight_frames = 0
-        else:
-            results = model(frame)
-            detections = results[0].boxes
+                            if len(cache) >= 5:
+                                cache.pop(0)
 
-            if detections is not None and len(detections.xyxy) > 0:
-                for detection, cls, conf in zip(
-                    detections.xyxy, detections.cls.cpu().numpy(), detections.conf.cpu().numpy()
-                ):
-                    if int(cls) == 0:
-                        bbox = detection.cpu().numpy()
-                        embedding = extract_embedding(reid_model, frame, bbox)
+                            cache.append({"id": current_id, "embedding": embedding})
+                            tracked_objects.append(current_id)
+                            log_position(frame_number, bbox, video_name, current_id)
+                            color = (0, 255, 0)
+                            label = f"New ID: {current_id}"
+                        else:
+                            continue
 
-                        matched_id = match_with_cache(embedding, cache)
-                        if matched_id:
-                            target_bbox = bbox
-                            initialize_tracker(frame, bbox)
-                            locked = True
-                            log_position(frame_number, target_bbox, video_name, matched_id, from_cache=True)
-                            return frame
-
-                        target_bbox = bbox
-                        initialize_tracker(frame, bbox)
-                        locked = True
-                        current_id += 1
-
-                        if len(cache) < 3:
-                            cache.append({"id": current_id, "embedding": embedding, "bbox": bbox})
-
-                        log_position(frame_number, target_bbox, video_name, current_id)
-                        break
-
-        if target_bbox is not None:
-            x1, y1, x2, y2 = map(int, target_bbox)
-            color = (0, 255, 0)
-            label = f"Person ID: {current_id}"
-
-            if match_with_cache(extract_embedding(reid_model, frame, target_bbox), cache):
-                color = (0, 0, 255)
-                label = "FROM CACHE:"
-
-            cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
-            cv2.putText(frame, label, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
+                    x1, y1, x2, y2 = map(int, bbox)
+                    cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
+                    cv2.putText(frame, label, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
 
         return frame
 
