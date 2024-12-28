@@ -12,7 +12,6 @@ WILDTRACK_PATH = "/Users/valdasv/Downloads/Wildtrack"
 VIDEO_PATH1 = f"{WILDTRACK_PATH}/cam1.mp4"
 VIDEO_PATH2 = f"{WILDTRACK_PATH}/cam4.mp4"
 
-
 def setup_reid_model():
     extractor = FeatureExtractor(
         model_name='osnet_x1_0',
@@ -20,7 +19,6 @@ def setup_reid_model():
         device='cuda' if torch.cuda.is_available() else 'cpu'
     )
     return extractor
-
 
 def preprocess_reid_image(frame, bbox):
     # Ensure bounding box is within frame dimensions
@@ -43,8 +41,6 @@ def preprocess_reid_image(frame, bbox):
     ])
     return preprocess(cropped).unsqueeze(0).to("cuda" if torch.cuda.is_available() else "cpu")
 
-
-
 def extract_embedding(reid_model, frame, bbox):
     x1, y1, x2, y2 = map(int, bbox)
     cropped = frame[y1:y2, x1:x2]
@@ -52,7 +48,6 @@ def extract_embedding(reid_model, frame, bbox):
         return None
     embedding = reid_model(cropped)
     return embedding.flatten()
-
 
 def match_with_cache(embedding, cache):
     if not cache:
@@ -64,7 +59,6 @@ def match_with_cache(embedding, cache):
         return cache[best_match_index]["id"]
     return None
 
-
 def lock_and_track_object(video_paths, model_path, reid_model_path, output_path, log_path, duration=5):
     model = YOLO(model_path)
     reid_model = setup_reid_model()
@@ -72,6 +66,8 @@ def lock_and_track_object(video_paths, model_path, reid_model_path, output_path,
     cache = []
     tracked_objects = []
     current_id = 0
+    id_switch_count = 0  # Track ID switches
+    last_tracked_ids = {}  # Store last tracked ID for each bbox
 
     def log_position(frame_number, bbox, video_name, object_id, from_cache=False):
         entry = {
@@ -88,8 +84,20 @@ def lock_and_track_object(video_paths, model_path, reid_model_path, output_path,
         }
         json_log.append(entry)
 
+    def display_cache(frame):
+        """Display cache entries with minimized images on the frame."""
+        x_offset, y_offset = 10, 10
+        for obj in cache:
+            x, y = x_offset, y_offset
+            label = f"Cached person with ID#{obj['id']}"
+            cv2.putText(frame, label, (x, y + 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
+            if "image" in obj:
+                resized_image = cv2.resize(obj["image"], (50, 100))
+                frame[y_offset:y_offset + 100, x_offset + 200:x_offset + 250] = resized_image
+            y_offset += 110
+
     def process_frame(frame, frame_number, video_name):
-        nonlocal cache, tracked_objects, current_id
+        nonlocal cache, tracked_objects, current_id, id_switch_count, last_tracked_ids
         results = model(frame)
         detections = results[0].boxes
 
@@ -104,16 +112,31 @@ def lock_and_track_object(video_paths, model_path, reid_model_path, output_path,
                         log_position(frame_number, bbox, video_name, matched_id, from_cache=True)
                         color = (0, 0, 255)
                         label = f"FROM CACHE: ID {matched_id}"
+
+                        # Check for ID switch
+                        bbox_key = tuple(map(int, bbox))
+                        if bbox_key in last_tracked_ids and last_tracked_ids[bbox_key] != matched_id:
+                            id_switch_count += 1
+                        last_tracked_ids[bbox_key] = matched_id
+
                         if matched_id not in tracked_objects:
                             tracked_objects.append(matched_id)
                     else:
-                        if len(tracked_objects) < 5:  # Limit the number of tracked objects to 5
+                        if len(tracked_objects) < 5:
                             current_id += 1
 
                             if len(cache) >= 5:
                                 cache.pop(0)
 
-                            cache.append({"id": current_id, "embedding": embedding})
+                            # Save minimized image in cache
+                            x1, y1, x2, y2 = map(int, bbox)
+                            cropped = frame[y1:y2, x1:x2]
+                            if cropped.size != 0:
+                                obj_image = cv2.resize(cropped, (50, 100))
+                                cache.append({"id": current_id, "embedding": embedding, "image": obj_image})
+                            else:
+                                cache.append({"id": current_id, "embedding": embedding})
+
                             tracked_objects.append(current_id)
                             log_position(frame_number, bbox, video_name, current_id)
                             color = (0, 255, 0)
@@ -125,6 +148,7 @@ def lock_and_track_object(video_paths, model_path, reid_model_path, output_path,
                     cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
                     cv2.putText(frame, label, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
 
+        display_cache(frame)
         return frame
 
     cap = cv2.VideoCapture(video_paths[0])
@@ -160,8 +184,10 @@ def lock_and_track_object(video_paths, model_path, reid_model_path, output_path,
     out.release()
     cv2.destroyAllWindows()
 
-    with open(log_path, 'w') as log_file:
-        json.dump(json_log, log_file, indent=4)
+    # with open(log_path, 'w') as log_file:
+    #     json.dump(json_log, log_file, indent=4)
+
+    print(f"ID Switch Count: {id_switch_count}")
 
 lock_and_track_object(
     video_paths=[VIDEO_PATH1, VIDEO_PATH2],
