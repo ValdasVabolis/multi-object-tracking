@@ -7,6 +7,7 @@ from torchvision.models import resnet50
 from torchreid.utils import FeatureExtractor
 from sklearn.metrics.pairwise import cosine_similarity
 import torch
+import time
 
 WILDTRACK_PATH = "/Users/valdasv/Downloads/Wildtrack"
 VIDEO_PATH1 = f"{WILDTRACK_PATH}/cam1.mp4"
@@ -68,6 +69,7 @@ def lock_and_track_object(video_paths, model_path, reid_model_path, output_path,
     current_id = 0
     id_switch_count = 0  # Track ID switches
     last_tracked_ids = {}  # Store last tracked ID for each bbox
+    flash_cache_ids = set()  # IDs that should flash green
 
     def log_position(frame_number, bbox, video_name, object_id, from_cache=False):
         entry = {
@@ -90,16 +92,19 @@ def lock_and_track_object(video_paths, model_path, reid_model_path, output_path,
         for obj in cache:
             x, y = x_offset, y_offset
             label = f"Cached person with ID#{obj['id']}"
-            cv2.putText(frame, label, (x, y + 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
+            color = (0, 255, 0) if obj['id'] in flash_cache_ids else (0, 0, 255)
+            cv2.putText(frame, label, (x, y + 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
             if "image" in obj:
                 resized_image = cv2.resize(obj["image"], (50, 100))
                 frame[y_offset:y_offset + 100, x_offset + 200:x_offset + 250] = resized_image
             y_offset += 110
 
     def process_frame(frame, frame_number, video_name):
-        nonlocal cache, tracked_objects, current_id, id_switch_count, last_tracked_ids
+        nonlocal cache, tracked_objects, current_id, id_switch_count, last_tracked_ids, flash_cache_ids
         results = model(frame)
         detections = results[0].boxes
+
+        flash_cache_ids.clear()  # Reset flash indicators each frame
 
         if detections is not None and len(detections.xyxy) > 0:
             for detection, cls in zip(detections.xyxy, detections.cls.cpu().numpy()):
@@ -121,8 +126,10 @@ def lock_and_track_object(video_paths, model_path, reid_model_path, output_path,
 
                         if matched_id not in tracked_objects:
                             tracked_objects.append(matched_id)
+
+                        flash_cache_ids.add(matched_id)  # Mark for flashing
                     else:
-                        if len(tracked_objects) < 5:
+                        if len(tracked_objects) < 5:  # Limit the number of tracked objects to 5
                             current_id += 1
 
                             if len(cache) >= 5:
