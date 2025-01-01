@@ -12,6 +12,7 @@ import time
 WILDTRACK_PATH = "/Users/valdasv/Downloads/Wildtrack"
 VIDEO_PATH1 = f"{WILDTRACK_PATH}/cam1_10.mp4"
 VIDEO_PATH2 = f"{WILDTRACK_PATH}/cam4_10.mp4"
+VIDEO_PATH3 = f"{WILDTRACK_PATH}/cam6_10.mp4"
 
 def setup_reid_model():
     extractor = FeatureExtractor(
@@ -97,6 +98,7 @@ def lock_and_track_object(video_paths, model_path, output_path, log_path, durati
         }
         json_log.append(entry)
 
+    
     def display_cache(frame):
         x_offset, y_offset = 10, 10
         frame_height, frame_width, _ = frame.shape
@@ -104,20 +106,21 @@ def lock_and_track_object(video_paths, model_path, output_path, log_path, durati
         for obj in cache[:5]:  # Limit to 5 people
             label = f"ID#{obj['id']} (Frames: {len(obj['matched_frames'])})"
             color = (0, 255, 0) if obj['id'] in flash_cache_ids else (0, 0, 255)
-            cv2.putText(frame, label, (x_offset, y_offset + 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
+            cv2.putText(frame, label, (x_offset, y_offset + 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
 
-            for i, preview in enumerate(obj['previews']):  # Display all frames for each person
-                if i >= 10:  # Limit to 10 previews per person
-                    break
-                x_preview = x_offset + (60 * i)  # Offset horizontally for each frame
+            # Adjust y_offset to create space for label
+            preview_y_offset = y_offset + 30
+
+            for i, preview in enumerate(obj['previews'][:10]):  # Limit to 10 previews per person
+                x_preview = x_offset + (60 * i)
                 resized_preview = cv2.resize(preview, (50, 100))
                 if len(resized_preview.shape) == 2:  # Handle grayscale previews
                     resized_preview = cv2.cvtColor(resized_preview, cv2.COLOR_GRAY2BGR)
 
-                if y_offset + 100 <= frame_height and x_preview + 50 <= frame_width:
-                    frame[y_offset:y_offset + 100, x_preview:x_preview + 50] = resized_preview
+                if preview_y_offset + 100 <= frame_height and x_preview + 50 <= frame_width:
+                    frame[preview_y_offset:preview_y_offset + 100, x_preview:x_preview + 50] = resized_preview
 
-            y_offset += 120  # Move vertically for the next person
+            y_offset += 140  # Move vertically for the next person
 
     def calculate_combined_similarity(embedding, obj_embeddings):
         similarities = [cosine_similarity([embedding], [e])[0][0] for e in obj_embeddings]
@@ -249,7 +252,7 @@ def lock_and_track_object(video_paths, model_path, output_path, log_path, durati
     print(f"Match Ratio: {match_ratio:.2f}")
 
 lock_and_track_object(
-    video_paths=[VIDEO_PATH1, VIDEO_PATH2],
+    video_paths=[VIDEO_PATH1, VIDEO_PATH2, VIDEO_PATH3],
     model_path='../models/yolo11n.pt',
     output_path='output/locked_tracking_output.mp4',
     log_path='output/object_movement_log.json'
