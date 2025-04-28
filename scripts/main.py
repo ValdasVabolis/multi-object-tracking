@@ -69,6 +69,23 @@ def match_with_cache(embedding, cache):
         return cache[best_match_index]["id"]
     return None
 
+def is_valid_embedding(new_embedding, existing_embeddings, threshold=0.7):
+    if not existing_embeddings:
+        return True
+    similarities = [cosine_similarity([new_embedding], [e])[0][0] for e in existing_embeddings]
+    average_similarity = np.mean(similarities)
+    return average_similarity >= threshold
+
+def validate_cache(cache, threshold=0.7):
+    for obj in cache:
+        embeddings = np.array(obj['embeddings'])
+        if len(embeddings) > 1:
+            similarities = cosine_similarity(embeddings)
+            median_similarity = np.median(similarities)
+            if median_similarity < threshold:
+                obj['embeddings'] = list(embeddings[np.where(similarities >= threshold)])
+                obj['previews'] = obj['previews'][:len(obj['embeddings'])]
+
 def lock_and_track_object(video_paths, model_path, output_path, log_path, duration=10):
     model = YOLO(model_path)
     reid_model = setup_reid_model()
@@ -133,6 +150,9 @@ def lock_and_track_object(video_paths, model_path, output_path, log_path, durati
 
         flash_cache_ids.clear()
 
+        if frame_number % 100 == 0:
+            validate_cache(cache)
+
         if detections is not None and len(detections.xyxy) > 0:
             match_found = False
             for detection, cls in zip(detections.xyxy, detections.cls.cpu().numpy()):
@@ -168,6 +188,8 @@ def lock_and_track_object(video_paths, model_path, output_path, log_path, durati
                         # Update cache with new matched frame
                         for obj in cache:
                             if obj['id'] == matched_id:
+                                if not is_valid_embedding(embedding, obj['embeddings']):
+                                    break
                                 obj['embeddings'].append(embedding)
                                 if frame_number % 10 == 0:  # Limit sampling to every 10th frame
                                     cropped = frame[int(bbox[1]):int(bbox[3]), int(bbox[0]):int(bbox[2])]
